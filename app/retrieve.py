@@ -13,7 +13,11 @@ embeddings = HuggingFaceEmbeddings(
     model_kwargs={"device": "cpu"},
     encode_kwargs={"normalize_embeddings": True}
 )
-vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+vectorstore = Chroma(
+    persist_directory=DB_DIR,
+    embedding_function=embeddings,
+    collection_metadata={"hnsw:space": "cosine"} # 【新增】强制使用余弦距离
+)
 
 # 加载 Rerank 模型（首次运行会自动从 HF 镜像站下载约 1.1GB 的权重）
 _reranker = None
@@ -26,10 +30,15 @@ def get_reranker():
     return _reranker
 
 
-def get_relevant_context(query: str, top_k: int = 3, use_rerank: bool = True) -> str:
+def get_relevant_context(query: str, top_k: int = 3, use_rerank: bool = True, source_file: str = None) -> str:
     """检索相关文档并拼接成上下文"""
+    # 构建检索的 filter 条件
+    search_kwargs = {"k": 5}
+    if source_file:
+        search_kwargs["filter"] = {"source": source_file}
+
     # 【阶段一：向量粗排】先多召回一些（Top 5），保证召回率
-    docs_with_score = vectorstore.similarity_search_with_score(query, k=5)
+    docs_with_score = vectorstore.similarity_search_with_score(query, **search_kwargs)
 
     valid_docs = []
     for doc, score in docs_with_score:

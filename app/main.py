@@ -1,7 +1,7 @@
 import os
 import shutil
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from app.generate import ask_rag # 导入写好的问答函数
 from app.ingest import async_ingest_document
@@ -14,10 +14,13 @@ import json
 import uuid
 import aiofiles
 import hashlib
+import redis
 from app.retrieve import vectorstore
 
 load_dotenv()
 app = FastAPI(title="RAG Eval Pipeline API")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,8 +37,27 @@ class QueryRequest(BaseModel):
 
 class AgentRequest(BaseModel):
     query: str
-    session_id: str = "test_user_1" # 新增
+    # 【修改】去掉默认值，强制要求传入，增加长度限制（1 到 64 个字符），且不可为空白字符
+    session_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="用户会话唯一标识，不可为空"
+    )
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_EXTENSIONS = {".md", ".txt"}
+def safe_doc_name(raw_name: str) -> str:
+    name = os.path.basename((raw_name or "").replace("\\", "/")).strip()
+    if not name or name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="文件名无效")
+    if os.path.splitext(name)[1].lower() not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="只接收Markdown文件或TXT文件")
+    if len(name) > 100:
+        raise HTTPException(status_code=400, detail="文件名过长")
+    return name
+
+    
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -61,39 +83,49 @@ def chat(request: QueryRequest):
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...)):
     """上传文档并异步解析入库"""
-    # 【修复1】防止路径穿越，重命名文件保留后缀
-    file_extension = os.path.splitext(file.filename)[1]
-    safe_filename = f"{uuid.uuid4().hex}{file_extension}"
+    filename = safe_doc_name(file.filename or "")
+    await asyncio.to_thread(os.makedirs, "data/docs", exist_ok=True)
+    file_id = uuid.uuid4().hex[:8]
+    tmp_path = os.path.join("data/docs", f".{file_id}.uploading")
+    final_path = os.path.join("data/docs", f"{file_id}_{filename}")
+    
 
-    # 确保目录存在
-    os.makedirs("data/docs", exist_ok=True)
-    file_path = f"data/docs/{file.filename}"
-
-    # 【新增】计算文件内容的 MD5 哈希
-    file_content = await file.read()
-    file_hash = hashlib.md5(file_content).hexdigest()
-    await file.seek(0) # 重置指针，方便后面写入
-
-    # 【新增】查询 Chroma 数据库中是否已存在该哈希
-    # where 过滤条件，检测 metadata 里的 file_path
-    existing_docs = vectorstore.get(where={"file_hash": file_hash})
-    if len(existing_docs['ids']) > 0:
-        raise HTTPException(status_code=400, detail="该文件已经存在于知识库中，请勿重复上传。")
-
-    # 【修复2】使用 aiofiles 异步写盘，不阻塞 Event Loop
-    async with aiofiles.open(file_path, 'wb') as out_file:
-        # 分块读取写入，避免大文件撑爆内存
-        while content := await file.read(1024 * 1024): # 每次读1MB
-            await out_file.write(content)
-
-    # 丢给 Celery 异步处理
-    task = async_ingest_document.delay(file_path, file_hash)
+    hasher = hashlib.md5()
+    total = 0
+    file_hash = ""
+    try:
+        async with aiofiles.open(tmp_path, "wb") as out_file:
+            while True:
+                block = await file.read(1024 * 1024)
+                if not block:
+                    break
+                total += len(block)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=400, detail="文件超过 10MB")
+                hasher.update(block)
+                await out_file.write(block)
+        if total == 0:
+            raise HTTPException(status_code=400, detail="文件是空的")
+        file_hash = hasher.hexdigest()
+        if not r.set(f"upload:{file_hash}", 1, nx=True, ex=3600):
+            raise HTTPException(status_code=400, detail="该文件正在上传，请勿重复上传")
+        if vectorstore.get(where={"file_hash": file_hash}, include=[], limit=1)["ids"]:
+            raise HTTPException(status_code=400, detail="该文件已经存在于知识库中")
+        os.replace(tmp_path, final_path)
+        # 丢给 Celery 异步处理
+        task = async_ingest_document.delay(final_path, file_hash)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        if os.path.exists(final_path):
+            os.remove(final_path)
+        raise
 
     return {
         "code": 200,
         "message": "文件已上传，正在后台解析入库",
         "task_id": task.id,
-        "filename": safe_filename
+        "filename": os.path.basename(final_path)
     }
 
 @app.get("/api/task/{task_id}")
@@ -112,6 +144,10 @@ def get_task_status(task_id: str):
 # 发起 Agent 任务
 @app.post("/api/agent")
 def run_agent_endpoint(request: AgentRequest):
+    # 【新增】防御性判空
+    if not request.session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id 不能为空白字符")
+
     task = async_run_agent.delay(request.query, request.session_id)
     return {"code": 200, "task_id": task.id}
 
