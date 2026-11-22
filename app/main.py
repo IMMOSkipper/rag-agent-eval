@@ -68,7 +68,7 @@ def chat(request: QueryRequest):
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
     try:
-        result, context = ask_rag(request.query, model_name=request.model_name)
+        result, context, _ = ask_rag(request.query, model_name=request.model_name)
         return {
             "code": 200,
             "data": {
@@ -89,7 +89,6 @@ async def upload_document(file: UploadFile = File(...)):
     tmp_path = os.path.join("data/docs", f".{file_id}.uploading")
     final_path = os.path.join("data/docs", f"{file_id}_{filename}")
     
-
     hasher = hashlib.md5()
     total = 0
     file_hash = ""

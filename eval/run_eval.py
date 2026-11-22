@@ -53,7 +53,7 @@ def run_eval(sample_times=3):
             expected = data["expected_behavior"]
 
             start_t = time.time()
-            ans, ctx = ask_rag(q)
+            ans, ctx, docs = ask_rag(q)
             is_refuse = "未检索到有效内容" in ctx or "无法回答" in ans or "抱歉" in ans
             latency = time.time() - start_t
 
@@ -69,8 +69,9 @@ def run_eval(sample_times=3):
                     print(f"✅️ [正常回答] {q} | 耗时: {latency:.2f}s")
                     valid_questions.append(q)
                     valid_answers.append(ans)
-                    valid_contexts.append([ctx])
+                    valid_contexts.append([doc.page_content for doc in docs])
                     valid_references.append(data.get("reference", ""))
+                    # print(f"  → 本次检索到 {len(docs)} 个 chunk")
                 else:
                     print(f"❌️ [漏答] {q} | 耗时: {latency:.2f}s")
             
@@ -99,6 +100,7 @@ def run_eval(sample_times=3):
             "reference": valid_references
         }
         dataset = Dataset.from_dict(data_dict)
+        # print(dataset["retrieved_contexts"][0])   # 应该是 3 个字符串，不是 1 个超长串
         scores_dict = {"faithfulness": [], "answer_relevancy": [], "context_precision": [], "context_recall": []}
         for i in range(sample_times):
             print(f" 🔄 第 {i+1}/{sample_times} 次采样评测中...")

@@ -5,7 +5,7 @@ from langchain_chroma import Chroma
 from sentence_transformers import CrossEncoder
 
 DB_DIR = "chroma_db"
-THRESHOLD = 0.9 # 调大，避免误杀
+THRESHOLD = 0.5
 
 # 全局加载模型，避免每次调用都重新加载
 embeddings = HuggingFaceEmbeddings(
@@ -30,7 +30,7 @@ def get_reranker():
     return _reranker
 
 
-def get_relevant_context(query: str, top_k: int = 3, use_rerank: bool = True, source_file: str = None) -> str:
+def get_relevant_docs(query: str, top_k: int = 3, use_rerank: bool = True, source_file: str = None) -> str:
     """检索相关文档并拼接成上下文"""
     # 构建检索的 filter 条件
     search_kwargs = {"k": 5}
@@ -62,10 +62,15 @@ def get_relevant_context(query: str, top_k: int = 3, use_rerank: bool = True, so
         doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
 
         # 截取最终要送给大模型的Top K
-        final_docs = [pair[0] for pair in doc_score_pairs[:top_k]]
+        final_docs = [pair for pair, _ in doc_score_pairs[:top_k]]
     else:
         final_docs = valid_docs[:top_k]
 
-    valid_contexts = [doc.page_content for doc in final_docs]
-    print(f"✅️ 最终命中 {len(valid_contexts)} 个块进入 Prompt")
-    return "\n\n---\n\n".join(valid_contexts)
+    return final_docs
+
+def get_relevant_context(query: str, top_k: int = 3, use_rerank: bool = True, source_file: str = None) -> str:
+    docs = get_relevant_docs(query, top_k=top_k, use_rerank=use_rerank, source_file=source_file)
+    print(f"✅️ 最终命中 {len(docs)} 个块进入 Prompt")
+    if not docs:
+        return ""
+    return "\n\n---\n\n".join(doc.page_content for doc in docs)

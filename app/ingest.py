@@ -74,7 +74,8 @@ def async_ingest_document(file_path: str, file_hash: str = ""):
     Chroma.from_documents(
         documents=clean_chunks,
         embedding=embeddings,
-        persist_directory=DB_DIR
+        persist_directory=DB_DIR,
+        collection_metadata={"hnsw:space": "cosine"},
     )
 
     return {"status": "success", "chunk_count": len(clean_chunks)}

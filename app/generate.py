@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
-from app.retrieve import get_relevant_context
+from app.retrieve import get_relevant_docs
 
 # 加载 .env 里的环境变量
 load_dotenv()
@@ -18,11 +18,13 @@ def ask_rag(query: str, model_name: str = DEFAULT_MODEL) -> str:
     print(f"\n🙋‍♂️ 用户：{query}")
 
     # 检索上下文
-    context = get_relevant_context(query)
+    docs = get_relevant_docs(query)
 
     # 如果没检索到有效内容，直接拒答
-    if not context:
-        return "抱歉，知识库没有找到与您问题相关的内容，我无法回答。", "未检索到有效内容"
+    if not docs:
+        return "抱歉，知识库没有找到与您问题相关的内容，我无法回答。", "未检索到有效内容", []
+
+    context = "\n\n---\n\n".join(doc.page_content for doc in docs)
 
     # 组装 Prompt
     prompt = f"""你是一个严谨的AI助手，请严格根据下面提供的参考资料来回答用户的问题。
@@ -48,7 +50,7 @@ def ask_rag(query: str, model_name: str = DEFAULT_MODEL) -> str:
         )
         answer = response.choices[0].message.content
         print(f"\n🤖 模型回答：\n{answer}\n" + "-" * 50)
-        return answer, context
+        return answer, context, docs
     except Exception as e:
         print(f"调用大模型失败：{e}")
         return f"调用大模型失败：{str(e)}", "未检索到有效内容"
