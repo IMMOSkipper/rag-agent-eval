@@ -86,5 +86,5 @@ if __name__ == "__main__":
     print(f"🧪 [本地测试] 开始同步入库：{TEST_DOC}")
     chunks = load_and_chunk(TEST_DOC)
     embeddings = get_embeddings()
-    Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=DB_DIR)
+    Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=DB_DIR, collection_metadata={"hnsw:space": "cosine"})
     print(f"✅️ [本地测试] 入库完成，共 {len(chunks)} 个块。")
