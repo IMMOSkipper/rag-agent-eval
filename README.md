@@ -1,98 +1,137 @@
-# 🚀 RAG Eval Pipeline: 大模型知识库问答与异步 Agent 调度服务
+# rag-agent-eval
 
-一个基于 FastAPI 构建的大模型 RAG 与 Agent 实战项目，聚焦长耗时任务的异步调度与工程化落地。本项目不仅实现了完整的 RAG（检索增强生成）链路，还针对**大模型推理耗时**、**库外问题幻觉**、**Agent 多步决策**以及**前端实时反馈**等企业落地痛点，提供了完整的工程化异步调度方案。
+一个基于 FastAPI + Celery + Redis 的大模型应用实践项目，用于验证 RAG 检索增强、Agent 工具调用（Function Calling）、异步任务队列与 SSE 进度推送的工程化落地，并附带一套可重复执行的评测体系。
 
-## ✨ 核心特性 (Features)
+## 技术栈
 
-*   **高并发异步解耦**：引入 `Celery + Redis` 实现文档解析与向量化（Embedding）的异步任务队列，彻底解决大文件上传导致的接口阻塞问题，接口响应降至毫秒级。
-*   **模块化的 RAG 链路与 Rerank 重排**：集成 LangChain + ChromaDB + BGE 向量模型，实现文档切块与检索。引入 `CrossEncoder` 进行两阶段检索（粗排+精排），结合阈值截断与 Prompt 约束，有效降低库外幻觉。
-*   **标准 ReAct Agent 工作流**：手搓基于标准 `Function Calling` (JSON Schema) 的 Agent 决策循环，支持多轮对话（Redis 短期记忆）。并通过 SSE (Server-Sent Events) 将 Agent 思考过程实时推流至前端。
-*   **双重熔断防死循环**：Agent 内置 `Max Steps (最大步数)` 与 `Max Execution Time (最大执行时间)` 双重熔断机制，彻底杜绝逻辑死循环与外部 API 卡死导致的 Token 浪费与线程阻塞。
-*   **异步流式 IO 优化**：在 SSE 接口中使用 `asyncio.to_thread` 将 Celery 同步查询卸载到线程池，完美解决高并发长连接场景下的事件循环（Event Loop）阻塞问题。
-*   **自动化评测流水线**：内置 `eval/` 评测脚本，包含正常问答与库外拒答题库。通过量化指标（内置一套 6 题的自建评测集（通过率 5/6），用于验证检索与拒答逻辑）驱动检索参数与 Prompt 调优。
-*   **多模型无缝适配**：遵循 12-Factor 原则，解耦 API Key 与 Base URL。封装统一的大模型调用客户端，支持在接口层参数化切换 DeepSeek、GPT 等多种模型。
-*   **一键容器化与极速启动**：提供完整的 Docker Compose 编排（API、Worker、Redis），并通过 Bind Mount 机制挂载本地模型缓存与代码目录，实现容器秒级启动与代码热更新。
+- **后端框架**：Python 3.10+、FastAPI、Celery、Redis
+- **RAG 编排**：LangChain、ChromaDB（cosine）、BAAI/bge-small-zh-v1.5（Embedding）、BAAI/bge-reranker-base（Rerank）
+- **大模型**：OpenAI 兼容接口，通过环境变量切换模型
+- **部署与评测**：Docker Compose、Ragas（LLM-as-a-Judge）
 
-## 🛠️ 技术栈 (Tech Stack)
+## 已实现的核心功能
 
-*   **后端框架**：Python 3.10+, FastAPI (SSE 流式输出, CORS 跨域支持)
-*   **异步调度**：Celery, Redis (Broker & Backend)
-*   **大模型与 RAG**：LangChain, ChromaDB (向量库), BAAI/bge-small-zh-v1.5 (Embedding), BAAI/bge-reranker-base (Rerank), DeepSeek / OpenAI 兼容接口
-*   **部署与工程化**：Docker, Docker Compose, python-dotenv
+### 1. 异步调度与流式交互
 
-## 🚀 快速开始 (Quick Start)
+- 文档解析与向量化通过 Celery 异步解耦，上传接口立即返回 `task_id`，避免阻塞请求链路。
+- Agent 的执行状态与步骤进度通过 SSE 实时推送，使用 `asyncio.to_thread` 包装同步 Celery 查询，避免阻塞事件循环。
 
-### 1. 克隆项目与配置环境变量
+### 2. 两阶段检索与防幻觉
 
-    git clone <your-repo-url>
-    cd rag-eval-pipeline
-    cp .env.example .env
+- **粗排**：Chroma 向量检索（显式指定 cosine 距离），配合阈值过滤低相关片段。
+- **精排**：引入 CrossEncoder（BGE Reranker）对候选片段二次打分，取 top3 送入 Prompt。
+- **兜底**：Prompt 强约束 + 检索为空时直接拒答，不调用大模型，抑制幻觉。
 
-编辑 .env 文件，填入你的大模型 API 信息：
+### 3. Agent 工作流与记忆管理
 
-    OPENAI_API_KEY="sk-your-api-key"
-    OPENAI_BASE_URL="https://api.your-provider.com/v1"
-    DEFAULT_MODEL="deepseek-v4.1-flash-1017"
+- 基于标准 Function Calling 与 JSON Schema 实现工具路由（天气查询 + 本地知识库），采用多步循环：决策 → 调用工具 → 观察结果 → 再决策。
+- 支持并行工具调用，逐个回填 `tool` 消息，保证 `tool_call_id` 一一对应。
+- 通过 Redis 维护多轮对话上下文，截断时按完整轮次切分，避免出现悬空的 `tool` 消息。
+- 使用 Pydantic 校验工具入参，Tenacity 处理可重试的网络异常。
 
-### 2. 一键 Docker 部署 (推荐)
+### 4. 工程化与安全防御
 
-*(请确保宿主机已安装 Docker Desktop)*
+- **并发控制**：Worker 使用单进程池（`--pool=solo`），避免多个进程各自加载 Embedding 与 Rerank 模型导致内存翻倍。
+- **文件安全**：`basename` + 扩展名白名单拦截路径穿越；仅接收 `.md` / `.txt`，单文件限制 10MB。
+- **写入可靠性**：临时文件 + `os.replace` 原子替换，避免写入中断产生半截文件。
+- **幂等去重**：写入临时文件时流式计算 MD5，重复文件直接拒绝并清理；配合 Redis `SETNX` 原子占位，防止并发重复入库。文件名前缀为 8 位随机串（非内容哈希），同一文件重传会生成新文件名，去重依赖 MD5 判定。
+- **熔断机制**：Agent 执行配置最大步数（5 步）与超时（60 秒）双重限制，同时为每次模型调用设置独立超时。
 
-    docker compose up -d --build
+### 5. 自动化评测体系
 
-> **性能与空间优化提示**：docker-compose.yml 中已将宿主机的 ~/.cache/huggingface 和当前代码目录挂载到容器内。容器无需重新下载大模型权重，且修改 Python 代码后只需 `docker compose restart` 即可秒级生效，绝不占用额外磁盘。
+- 引入 **Ragas**，构建 8 道题的测试集（6 道可回答 + 2 道诱导性拒答）。
+- 外层 **3 次重采样**计算均值与标准差，降低 LLM-as-a-Judge 的随机性。
+- 另建 Agent 专用评测，覆盖工具选择准确率、步数合规率、事实命中率与越界拒答率。
 
-### 3. 本地开发模式 (可选)
+## 评测结果
 
-    python -m venv .venv
-    source .venv/bin/activate  # Windows: .venv\Scripts\activate
-    pip install -r requirements.txt
+最近一次运行（3 次重采样）：
 
-    # 启动 Redis
-    docker run -d --name redis-rag -p 6379:6379 redis
+| 指标 | 均值 | 有效样本 |
+|---|---|---|
+| Faithfulness | 0.95 | n=5 |
+| Answer Relevancy | 0.94 | n=5 |
+| Context Precision | 1.00 | n=5 |
+| Context Recall | 1.00 | n=5 |
+| 拒答准确率 | 2/2 | n=2 |
 
-    # 终端 1: 启动 FastAPI
-    uvicorn app.main:app --reload
+> 说明：当前测试集规模较小且语料单一，检索几乎必然命中，Context 指标接近饱和；拒答题仅 2 条，统计意义有限。上表用于回归对比，不代表通用场景下的绝对水平。
 
-    # 终端 2: 启动 Celery Worker
-    celery -A app.celery_app worker --loglevel=info
+## 检索设计
 
-访问 http://127.0.0.1:8000/docs 即可查看并测试 API 接口。
+| 环节 | 参数 | 说明 |
+|---|---|---|
+| 切块 | 400 字符 / 80 重叠 | 控制在 bge 的 512 token 上限内 |
+| 粗排 | top5 | `similarity_search_with_score`，cosine 距离 |
+| 阈值 | `THRESHOLD = 0.5` | 距离上限，等价余弦相似度 ≥ 0.5 |
+| 精排 | top3 | BGE Reranker 二次排序 |
 
-## 📡 API 接口说明
+> Chroma 的 cosine 空间返回 `1 - 余弦相似度`，值越小越相关。阈值是对距离的上限约束。
 
-*   `POST /api/upload`：上传文档（异步）。返回 `task_id`。
-*   `GET /api/task/{task_id}`：轮询查询文档解析与入库状态。
-*   `POST /api/chat`：基于知识库的常规同步问答。可传入 `model_name` 切换模型。
-*   `POST /api/agent`：发起 Agent 任务。可传入 `query` 和 `session_id`。返回 `task_id`。
-*   `GET /api/agent/stream/{task_id}`：**SSE 接口**，实时推送 Agent 的思考与工具调用状态。
+## 接口说明
 
-## 🧪 自动化评测 (Evaluation)
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/health` | 健康检查 |
+| POST | `/api/upload` | 上传文档，返回 `task_id` |
+| POST | `/api/chat` | 同步问答，返回答案与引用片段 |
+| POST | `/api/agent` | 异步 Agent，返回 `task_id` |
+| GET | `/api/task/{task_id}` | 查询任务状态 |
+| GET | `/api/agent/stream/{task_id}` | SSE 推送执行进度 |
 
-本项目自带了一套轻量级的自动化评测流水线，用于验证系统的检索质量与防幻觉能力。
+## 快速开始
 
-运行评测脚本：
+1. 配置 `.env`（填入 API Key 与 Base URL）。
+2. 启动服务：
 
-    python eval/run_eval.py
+```bash
+docker compose up -d --build
+```
 
-*评测结果将输出每道题目的检索命中情况、模型回答以及最终的通过率（基准准确率 83.3%）。*
+3. 访问接口文档：`http://127.0.0.1:8000/docs`
 
-## 📂 项目结构
+4. 上传文档：
 
-    rag-eval-pipeline/
-    ├── app/
-    │   ├── main.py          # FastAPI 入口、路由、CORS 与 SSE 流式响应
-    │   ├── celery_app.py    # Celery 实例与环境变量读取
-    │   ├── ingest.py        # 文档异步解析与向量化入库
-    │   ├── retrieve.py      # 向量检索、阈值拦截与 Rerank 精排
-    │   ├── generate.py      # 大模型 Prompt 拼装与生成
-    │   └── agent.py         # 标准 Function Calling 与 ReAct 循环控制
-    ├── eval/
-    │   ├── questions.jsonl  # 自建评测集（含正常与拒答）
-    │   └── run_eval.py      # 自动化评测脚本
-    ├── data/docs/           # 测试文档存放目录
-    ├── .env.example         # 环境变量模板
-    ├── Dockerfile           # 镜像构建文件（含国内源优化）
-    ├── docker-compose.yml   # API、Worker、Redis 容器编排
-    ├── requirements.txt     # Python 依赖清单
-    └── README.md
+```bash
+curl -X POST http://127.0.0.1:8000/api/upload \
+  -F "file=@你的文件.md"
+```
+
+5. 执行评测：
+
+```bash
+python eval/run_eval.py
+python eval/run_agent_eval.py
+```
+
+## 项目边界与后续规划
+
+- 当前 Agent 评测采用硬编码判定，后续计划引入 LangSmith 等工具做全链路 Trace。
+- 当前 Worker 并发受限，未来考虑将 Embedding 与 Rerank 剥离为独立的 Model Serving 服务。
+- 评测集计划扩充至 20–30 题，并引入主题相近的干扰文档，提升指标区分度。
+- Ragas 的 judge 目前与生成模型相同，存在自评偏好，计划切换为独立模型。
+- 待补充单元测试与 GitHub Actions 流水线。
+
+## 目录结构
+
+```text
+rag-agent-eval/
+├── app/
+│   ├── __init__.py
+│   ├── main.py           # FastAPI 入口与路由
+│   ├── ingest.py         # 文档解析、切块、入库
+│   ├── retrieve.py       # 粗排 + 阈值 + 精排
+│   ├── generate.py       # Prompt 与答案生成
+│   ├── agent.py          # Function Calling 循环
+│   └── celery_app.py     # Celery 配置
+├── data/docs/            # 原始文档与入库副本
+├── eval/
+│   ├── questions.jsonl
+│   ├── ragas_report.json
+│   ├── run_eval.py
+│   └── run_agent_eval.py
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+└── README.md
+```
