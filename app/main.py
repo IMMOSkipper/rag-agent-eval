@@ -155,6 +155,7 @@ def run_agent_endpoint(request: AgentRequest):
 async def stream_agent_status(task_id: str):
     async def event_generator():
         last_meta = None
+        idle_count = 0 # 记录空闲轮数
         while True:
             # 用 asyncio.to_thread 把同步阻塞的 Celery 查询放到后台线程
             # 这样即使有 1000 个并发，也不会卡死 FastAPI 的主线程
@@ -167,6 +168,7 @@ async def stream_agent_status(task_id: str):
                 info = await asyncio.to_thread(lambda: task.info)
                 if info != last_meta:
                     last_meta = info
+                    idle_count = 0 # 有动静了，重置空闲计数
                     yield f"data: {json.dumps(info, ensure_ascii=False)}\n\n"
             elif state == 'SUCCESS':
                 result = await asyncio.to_thread(lambda: task.result)
@@ -181,6 +183,11 @@ async def stream_agent_status(task_id: str):
                 # 透传给前端
                 yield f"data: {json.dumps({'status': 'failed', 'error': error_msg}, ensure_ascii=False)}\n\n"
                 break
+
+            # 【新增】如果连续15秒没有新状态，发送一个空行（注释）保活
+            if idle_count >= 15:
+                yield ": keep-alive\n\n"
+                idle_count = 0
 
             await asyncio.sleep(1) # 每秒轮询一次 Redis 状态
 
