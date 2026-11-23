@@ -150,6 +150,8 @@ def get_safe_history(messages: list) -> list:
 
 @celery_app.task(bind=True)
 def async_run_agent(self, query: str, session_id: str = "default_user", model_name=DEFAULT_MODEL):
+    # 故意制造一个错误用于测试
+    # raise ValueError("测试：大模型接口连接超时了！")
     # 从 Redis 取出历史记忆
     history_key = f"chat_history:{session_id}"
     history_json = r.get(history_key)

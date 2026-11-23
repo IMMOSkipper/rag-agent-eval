@@ -173,7 +173,13 @@ async def stream_agent_status(task_id: str):
                 yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
                 break
             elif state == 'FAILURE':
-                yield f"data: {json.dumps({'status': 'failed'}, ensure_ascii=False)}\n\n"
+                # 【修改】获取 Celery 任务真实抛出的异常信息
+                info = await asyncio.to_thread(lambda: task.info)
+                error_info = str(info) if info else "Unknow Error"
+                error_msg = f"Agent执行失败，后台报错: {error_info}"
+                print(f"❌️ {error_msg}")
+                # 透传给前端
+                yield f"data: {json.dumps({'status': 'failed', 'error': error_msg}, ensure_ascii=False)}\n\n"
                 break
 
             await asyncio.sleep(1) # 每秒轮询一次 Redis 状态
